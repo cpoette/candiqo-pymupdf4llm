@@ -1,87 +1,278 @@
-from flask import Flask, request, jsonify
-import pymupdf4llm
-import os
 import base64
-import logging
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from flask import Flask, jsonify, request
+from werkzeug.utils import secure_filename
+
+# ------------------------------------------------------------
+# Config
+# ------------------------------------------------------------
+
+SERVICE_NAME = os.getenv("SERVICE_NAME", "cv-extractor")  # ex: "docling" / "pdfparse"
+MAX_BYTES = int(os.getenv("MAX_BYTES", str(15 * 1024 * 1024)))  # 15MB default
 
 app = Flask(__name__)
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok", "service": "pdf-extractor"})
 
-@app.route('/extract', methods=['POST'])
-def extract():
-    """Extract text from PDF - accepts both multipart and JSON+base64"""
-    
-    temp_path = None  # Init pour le finally
-    
+# ------------------------------------------------------------
+# Helpers: scoring / quality
+# ------------------------------------------------------------
+
+def compute_quality(text: str) -> Dict[str, Any]:
+    text = text or ""
+    char_count = len(text)
+
+    letters = len(re.findall(r"[A-Za-zÀ-ÿ]", text))
+    alpha_ratio = (letters / char_count) if char_count else 0.0
+
+    words = re.findall(r"[A-Za-zÀ-ÿ]{2,}", text.lower())
+    unique_words = len(set(words))
+
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    line_count = len(lines)
+    short_lines = sum(1 for ln in lines if len(ln.strip()) < 12)
+    short_line_ratio = (short_lines / line_count) if line_count else 0.0
+
+    weird = len(re.findall(r"[�\uFFFD]", text))
+    garbage_ratio = (weird / char_count) if char_count else 0.0
+
+    return {
+        "char_count": char_count,
+        "alpha_ratio": round(alpha_ratio, 4),
+        "unique_words": unique_words,
+        "line_count": line_count,
+        "short_line_ratio": round(short_line_ratio, 4),
+        "garbage_ratio": round(garbage_ratio, 4),
+    }
+
+
+def compute_risk(quality: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Risk score = proxy 'risque de trahison' / structure instable.
+    0 (safe) -> 100 (danger)
+    """
+    risk = 0
+    flags: List[str] = []
+
+    char_count = quality.get("char_count", 0)
+    alpha_ratio = quality.get("alpha_ratio", 0.0)
+    unique_words = quality.get("unique_words", 0)
+    short_line_ratio = quality.get("short_line_ratio", 0.0)
+    garbage_ratio = quality.get("garbage_ratio", 0.0)
+
+    if char_count == 0:
+        risk = 100
+        flags.append("empty_text")
+        return {"risk_score": risk, "flags": flags}
+
+    if alpha_ratio < 0.25:
+        risk += 40
+        flags.append("low_alpha_ratio")
+
+    if unique_words < 80:
+        risk += 25
+        flags.append("low_unique_words")
+
+    if short_line_ratio > 0.55:
+        risk += 30
+        flags.append("layout_fragmented")
+
+    if garbage_ratio > 0.002:
+        risk += 20
+        flags.append("garbage_chars")
+
+    risk = max(0, min(100, risk))
+    if risk <= 20:
+        flags.append("ok")
+    elif risk <= 50:
+        flags.append("warn")
+    else:
+        flags.append("danger")
+
+    return {"risk_score": risk, "flags": flags}
+
+
+# ------------------------------------------------------------
+# File handling
+# ------------------------------------------------------------
+
+@dataclass
+class IncomingPdf:
+    path: str
+    filename: str
+
+
+def _save_uploaded_pdf() -> IncomingPdf:
+    """
+    Accepts either:
+      - multipart/form-data with 'pdf' file
+      - application/json with { "filename": "...", "content_base64": "..." }
+    Writes to a unique temp file and returns path.
+    """
+    # multipart
+    if "pdf" in request.files:
+        pdf_file = request.files["pdf"]
+        safe_name = secure_filename(pdf_file.filename or "document.pdf")
+
+        # Create unique temp file
+        fd, temp_path = tempfile.mkstemp(prefix="pdf_", suffix="_" + safe_name)
+        os.close(fd)
+
+        pdf_file.save(temp_path)
+        return IncomingPdf(path=temp_path, filename=safe_name)
+
+    # json base64
+    if request.is_json:
+        data = request.get_json(silent=True) or {}
+        filename = secure_filename(data.get("filename", "document.pdf"))
+        content_b64 = data.get("content_base64", "")
+
+        if not content_b64:
+            raise ValueError("Missing content_base64 in JSON body")
+
+        raw = base64.b64decode(content_b64)
+
+        if len(raw) > MAX_BYTES:
+            raise ValueError(f"File too large: {len(raw)} bytes > {MAX_BYTES}")
+
+        fd, temp_path = tempfile.mkstemp(prefix="pdf_", suffix="_" + filename)
+        os.close(fd)
+
+        with open(temp_path, "wb") as f:
+            f.write(raw)
+
+        return IncomingPdf(path=temp_path, filename=filename)
+
+    raise ValueError("No PDF provided. Use multipart field 'pdf' or JSON with content_base64.")
+
+
+# ------------------------------------------------------------
+# Extraction implementation placeholder
+# ------------------------------------------------------------
+
+def extract_text_impl(pdf_path: str):
+    """
+    PyMuPDF4LLM:
+      - conversion directe en Markdown via to_markdown()
+      - pages via fitz
+    """
+    warnings = []
+    meta = {"pages": None}
+
     try:
-        # Try multipart first
-        if 'pdf' in request.files:
-            pdf_file = request.files['pdf']
-            temp_path = f"/tmp/{pdf_file.filename}"
-            pdf_file.save(temp_path)
-        
-        # Try JSON with base64
-        elif request.is_json:
-            data = request.get_json()
-            if 'pdf_base64' not in data:
-                return jsonify({"error": "No PDF data"}), 400
-            
-            pdf_base64 = data['pdf_base64']
-            filename = data.get('filename', 'document.pdf')
-            
-            # Decode base64
-            try:
-                pdf_bytes = base64.b64decode(pdf_base64)
-            except Exception as e:
-                return jsonify({"error": f"Invalid base64: {str(e)}"}), 400
-            
-            temp_path = f"/tmp/{filename}"
-            with open(temp_path, 'wb') as f:
-                f.write(pdf_bytes)
-        
-        else:
-            return jsonify({"error": "No PDF provided"}), 400
-        
-        # Log avant extraction
-        logger.info(f"Fichier sauvegardé: {temp_path}")
-        logger.info(f"Taille fichier: {os.path.getsize(temp_path)} bytes")
-        
-        # EXTRACTION
-        markdown_text = pymupdf4llm.to_markdown(
-            temp_path,
-            page_chunks=False,
-            write_images=False
-        )
-        
-        # DEBUG LOGS
-        logger.info(f"✓ Extraction terminée")
-        logger.info(f"  - Caractères extraits: {len(markdown_text)}")
-        logger.info(f"  - Est vide: {len(markdown_text) == 0}")
-        logger.info(f"  - Premiers 200 chars: {markdown_text[:200]}")
-        
-        return jsonify({
-            "success": True,
-            "markdown": markdown_text,
-            "extraction_method": "pymupdf4llm",
-            "char_count": len(markdown_text),
-            "has_content": len(markdown_text) > 0
-        })
-    
+        import fitz  # PyMuPDF
     except Exception as e:
-        logger.error(f"Extraction failed: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
-    
-    finally:
-        # Cleanup dans tous les cas
-        if temp_path and os.path.exists(temp_path):
-            os.remove(temp_path)
-            logger.info(f"Fichier temporaire supprimé: {temp_path}")
+        raise RuntimeError(f"PyMuPDF import failed: {e}")
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    try:
+        import pymupdf4llm
+    except Exception as e:
+        raise RuntimeError(f"pymupdf4llm import failed: {e}")
+
+    # Page count
+    try:
+        doc = fitz.open(pdf_path)
+        meta["pages"] = doc.page_count
+        doc.close()
+    except Exception:
+        warnings.append("pymupdf_page_count_failed")
+
+    try:
+        # Tu peux passer des options ici plus tard (images, etc.)
+        text = pymupdf4llm.to_markdown(pdf_path) or ""
+    except Exception as e:
+        warnings.append("pymupdf4llm_failed")
+        raise RuntimeError(f"pymupdf4llm.to_markdown failed: {e}")
+
+    if not text.strip():
+        warnings.append("pymupdf4llm_empty_output")
+
+    return text, meta, warnings
+
+
+
+# ------------------------------------------------------------
+# Routes
+# ------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok", "service": SERVICE_NAME})
+
+
+@app.post("/score")
+def score():
+    if not request.is_json:
+        return jsonify({"error": "Expected JSON body {text: ...}"}), 400
+
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+
+    quality = compute_quality(text)
+    risk = compute_risk(quality)
+
+    # A simple readability score derived from quality/risk
+    # (you can tune later; keep deterministic)
+    readability_score = max(0, min(100, int(
+        (quality["alpha_ratio"] * 60)
+        + (min(1.0, quality["unique_words"] / 1200) * 25)
+        + (min(1.0, quality["char_count"] / 12000) * 25)
+        - (risk["risk_score"] * 0.5)
+    )))
+
+    return jsonify({
+        "quality": quality,
+        "risk": risk,
+        "readability_score": readability_score,
+    })
+
+
+@app.post("/extract")
+def extract():
+    # Optional: ?strategy=auto|docling|pymupdf4llm|pdfparse
+    strategy = request.args.get("strategy", "auto")
+
+    incoming: Optional[IncomingPdf] = None
+    try:
+        incoming = _save_uploaded_pdf()
+
+        text, meta, warnings = extract_text_impl(incoming.path)
+
+        quality = compute_quality(text)
+        risk = compute_risk(quality)
+
+        # Keep response stable, even if empty
+        return jsonify({
+            "strategy_used": SERVICE_NAME if strategy == "auto" else strategy,
+            "text": text,
+            "meta": {
+                "filename": incoming.filename,
+                **(meta or {}),
+            },
+            "quality": quality,
+            "risk": risk,
+            "warnings": warnings or [],
+        })
+
+    except Exception as e:
+        return jsonify({
+            "strategy_used": SERVICE_NAME,
+            "error": str(e),
+        }), 400
+
+    finally:
+        # Always cleanup temp file
+        try:
+            if incoming and incoming.path and os.path.exists(incoming.path):
+                os.remove(incoming.path)
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    # Local dev only; in Docker we use gunicorn
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)

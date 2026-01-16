@@ -26,3 +26,6 @@ EXPOSE 5000
 
 # Prod server
 CMD ["sh", "-c", "gunicorn -w ${WORKERS} --threads ${THREADS} -t ${TIMEOUT} -b 0.0.0.0:${PORT} app:app"]
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health').read()"

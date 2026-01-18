@@ -187,8 +187,6 @@ def extract_text_impl(pdf_path: str):
             pdf_path,
             margins=0,            # full page
             fontsize_limit=0,     # <-- IMPORTANT: keep tiny text (footer-ish)
-            header=True,
-            footer=True,
             force_text=True,
         ) or ""
     except Exception as e:

@@ -12,8 +12,20 @@ WORKDIR /app
 
 # (Optionnel mais recommandé) : paquets de base utiles (certs, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libglib2.0-0 \
+    libgl1 \
+    libxrender1 \
+    libxext6 \
+    libsm6 \
+    libfontconfig1 \
+    libfreetype6 \
+    libjpeg62-turbo \
+    libpng16-16 \
+    libopenjp2-7 \
     ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
+
 
 # Déps Python
 COPY requirements.txt /app/requirements.txt

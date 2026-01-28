@@ -268,6 +268,68 @@ def score():
         "readability_score": readability_score,
     })
 
+def compute_layout_signals(pdf_path: str, max_pages: int = 2) -> Dict[str, Any]:
+    """
+    Fast structural scan using PyMuPDF layout (NO OCR).
+    Purpose: detect multi-column / table-like PDFs.
+    """
+    import fitz
+
+    doc = fitz.open(pdf_path)
+
+    blocks = []
+    page_count = min(len(doc), max_pages)
+
+    for p in range(page_count):
+        page = doc[p]
+        for b in page.get_text("blocks"):
+            # block format: (x0, y0, x1, y1, text, block_no, block_type)
+            x0, y0, x1, y1 = b[:4]
+            blocks.append({
+                "x0": round(x0, 1),
+                "y0": round(y0, 1),
+                "x1": round(x1, 1),
+                "y1": round(y1, 1),
+            })
+
+    doc.close()
+
+    if not blocks:
+        return {
+            "blocks_count": 0,
+            "columns_estimate": 1,
+            "suspected_multicol": False,
+            "table_like_ratio": 0.0,
+            "sample_blocks": []
+        }
+
+    # --- Heuristics (pure geometry) ---
+    xs = [b["x0"] for b in blocks]
+    xs_sorted = sorted(xs)
+
+    # crude column clustering by x-gaps
+    gaps = [
+        xs_sorted[i + 1] - xs_sorted[i]
+        for i in range(len(xs_sorted) - 1)
+    ]
+    large_gaps = [g for g in gaps if g > 40]
+
+    columns_estimate = 2 if len(large_gaps) >= len(xs_sorted) * 0.1 else 1
+    suspected_multicol = columns_estimate > 1
+
+    # table-like: many small blocks aligned in rows
+    heights = [(b["y1"] - b["y0"]) for b in blocks]
+    small_blocks = [h for h in heights if h < 14]
+    table_like_ratio = round(len(small_blocks) / len(blocks), 3)
+
+    return {
+        "blocks_count": len(blocks),
+        "columns_estimate": columns_estimate,
+        "suspected_multicol": suspected_multicol,
+        "table_like_ratio": table_like_ratio,
+        "sample_blocks": blocks[:8],  # debug only
+    }
+
 
 @app.post("/extract")
 def extract():
@@ -286,6 +348,8 @@ def extract():
 
         text, meta, warnings = extract_text_impl(incoming.path, strategy=impl_strategy)
 
+        layout_signals = compute_layout_signals(incoming.path)
+
 
         quality = compute_quality(text)
         risk = compute_risk(quality)
@@ -300,8 +364,10 @@ def extract():
             },
             "quality": quality,
             "risk": risk,
+            "layout_signals": layout_signals,
             "warnings": warnings or [],
         })
+
 
     except Exception as e:
         return jsonify({

@@ -154,44 +154,77 @@ def _save_uploaded_pdf() -> IncomingPdf:
 # Extraction implementation placeholder
 # ------------------------------------------------------------
 
-def extract_text_impl(pdf_path: str):
+def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     """
-    PyMuPDF4LLM:
-      - conversion directe en Markdown via to_markdown()
-      - pages via fitz
+    Strategies:
+      - "pymupdf4llm"       : comportement actuel (pas de layout)
+      - "pymupdf_layout"    : active PyMuPDF Layout (import order important)
     """
     warnings = []
     meta = {"pages": None}
 
+    # Lazy imports (important for layout import order)
     try:
         import fitz  # PyMuPDF
     except Exception as e:
         raise RuntimeError(f"PyMuPDF import failed: {e}")
+
+    use_layout = (strategy == "pymupdf_layout")
+
+    # IMPORTANT: layout must be imported BEFORE pymupdf4llm to activate it
+    # https://pymupdf.readthedocs.io/.../pymupdf-layout/index.html
+    if use_layout:
+        try:
+            import pymupdf.layout  # noqa: F401
+        except Exception as e:
+            warnings.append("pymupdf_layout_import_failed")
+            raise RuntimeError(f"pymupdf-layout import failed: {e}")
 
     try:
         import pymupdf4llm
     except Exception as e:
         raise RuntimeError(f"pymupdf4llm import failed: {e}")
 
-    # Page count
+    # Open once
     try:
         doc = fitz.open(pdf_path)
+    except Exception as e:
+        raise RuntimeError(f"fitz.open failed: {e}")
+
+    try:
         meta["pages"] = doc.page_count
-        doc.close()
     except Exception:
         warnings.append("pymupdf_page_count_failed")
 
+    # OCR: OFF by default (keeps container simple & deterministic)
+    enable_ocr = os.getenv("ENABLE_OCR", "0").strip() == "1"
+
     try:
-        # Tu peux passer des options ici plus tard (images, etc.)
+        # PyMuPDF Layout works best by passing a Document object (doc) to pymupdf4llm
+        # and requires the import order above.
         text = pymupdf4llm.to_markdown(
-            pdf_path,
-            margins=0,            # full page
-            fontsize_limit=0,     # <-- IMPORTANT: keep tiny text (footer-ish)
+            doc,
+            margins=0,
+            fontsize_limit=0,
             force_text=True,
+            # header/footer removal is supported in layout mode (nice for CVs)
+            header=False if use_layout else True,
+            footer=False if use_layout else True,
+            # avoid unexpected OCR dependency unless explicitly enabled
+            use_ocr=enable_ocr,
         ) or ""
+    except TypeError:
+        # In case older pymupdf4llm doesn't accept some params, fallback with minimal args
+        warnings.append("pymupdf4llm_param_fallback")
+        text = pymupdf4llm.to_markdown(doc) or ""
     except Exception as e:
         warnings.append("pymupdf4llm_failed")
         raise RuntimeError(f"pymupdf4llm.to_markdown failed: {e}")
+    finally:
+        try:
+            doc.close()
+        except Exception:
+            pass
 
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")
@@ -245,7 +278,14 @@ def extract():
     try:
         incoming = _save_uploaded_pdf()
 
-        text, meta, warnings = extract_text_impl(incoming.path)
+        # Optional: ?strategy=auto|pymupdf4llm|pymupdf_layout
+        strategy = request.args.get("strategy", "auto").strip().lower()
+
+        # auto: garde ton comportement actuel
+        impl_strategy = "pymupdf4llm" if strategy in ("auto", "", None) else strategy
+
+        text, meta, warnings = extract_text_impl(incoming.path, strategy=impl_strategy)
+
 
         quality = compute_quality(text)
         risk = compute_risk(quality)

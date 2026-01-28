@@ -1,6 +1,6 @@
 flask==3.0.3
 gunicorn==22.0.0
 werkzeug==3.0.3
-pymupdf==1.24.14
+pymupdf
 pymupdf-layout
 pymupdf4llm

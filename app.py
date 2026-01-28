@@ -270,31 +270,41 @@ def score():
 
 def compute_layout_signals(pdf_path: str, max_pages: int = 2) -> Dict[str, Any]:
     """
-    Fast structural scan using PyMuPDF layout (NO OCR).
-    Purpose: detect multi-column / table-like PDFs.
+    Fast structural scan using PyMuPDF (NO OCR).
+    Purpose: detect multi-column / table-ish layouts.
     """
     import fitz
 
     doc = fitz.open(pdf_path)
 
-    blocks = []
-    page_count = min(len(doc), max_pages)
+    all_blocks = []
+    widths = []
+    page_w = None
 
+    page_count = min(len(doc), max_pages)
     for p in range(page_count):
         page = doc[p]
+        page_w = float(page.rect.width)
+
         for b in page.get_text("blocks"):
-            # block format: (x0, y0, x1, y1, text, block_no, block_type)
+            # (x0, y0, x1, y1, text, block_no, block_type)
             x0, y0, x1, y1 = b[:4]
-            blocks.append({
-                "x0": round(x0, 1),
-                "y0": round(y0, 1),
-                "x1": round(x1, 1),
-                "y1": round(y1, 1),
+            w = float(x1 - x0)
+            h = float(y1 - y0)
+
+            all_blocks.append({
+                "x0": round(float(x0), 1),
+                "y0": round(float(y0), 1),
+                "x1": round(float(x1), 1),
+                "y1": round(float(y1), 1),
+                "w": round(w, 1),
+                "h": round(h, 1),
             })
+            widths.append(w)
 
     doc.close()
 
-    if not blocks:
+    if not all_blocks or not page_w:
         return {
             "blocks_count": 0,
             "columns_estimate": 1,
@@ -303,32 +313,80 @@ def compute_layout_signals(pdf_path: str, max_pages: int = 2) -> Dict[str, Any]:
             "sample_blocks": []
         }
 
-    # --- Heuristics (pure geometry) ---
-    xs = [b["x0"] for b in blocks]
-    xs_sorted = sorted(xs)
+    # ---------- filter: keep "content-like" blocks ----------
+    # Drop tiny blocks (bullets, separators, noise)
+    useful = []
+    for b in all_blocks:
+        if b["w"] < 35:      # too narrow (bullet column)
+            continue
+        if b["h"] < 8:       # too short (lines / separators)
+            continue
+        useful.append(b)
 
-    # crude column clustering by x-gaps
-    gaps = [
-        xs_sorted[i + 1] - xs_sorted[i]
-        for i in range(len(xs_sorted) - 1)
-    ]
-    large_gaps = [g for g in gaps if g > 40]
+    # If we filtered too aggressively, fallback to all blocks
+    if len(useful) < max(8, int(len(all_blocks) * 0.25)):
+        useful = all_blocks
 
-    columns_estimate = 2 if len(large_gaps) >= len(xs_sorted) * 0.1 else 1
-    suspected_multicol = columns_estimate > 1
+    # ---------- table-like ratio ----------
+    # A lot of short-height blocks suggests tables / fragmented layout
+    small_blocks = [b for b in useful if b["h"] < 14]
+    table_like_ratio = round(len(small_blocks) / len(useful), 3) if useful else 0.0
 
-    # table-like: many small blocks aligned in rows
-    heights = [(b["y1"] - b["y0"]) for b in blocks]
-    small_blocks = [h for h in heights if h < 14]
-    table_like_ratio = round(len(small_blocks) / len(blocks), 3)
+    # ---------- multi-column detection via histogram peaks ----------
+    # Normalize x0 to [0..1]
+    xs = [b["x0"] / page_w for b in useful]
+    xs = [x for x in xs if 0.0 <= x <= 1.0]
+
+    # Histogram bins
+    bins = 20
+    hist = [0] * bins
+    for x in xs:
+        idx = min(bins - 1, max(0, int(x * bins)))
+        hist[idx] += 1
+
+    # Find peaks: local maxima above a small threshold
+    # threshold adapts to sample size
+    thr = max(2, int(len(xs) * 0.08))
+    peaks = []
+    for i in range(1, bins - 1):
+        if hist[i] >= thr and hist[i] >= hist[i - 1] and hist[i] >= hist[i + 1]:
+            peaks.append(i)
+
+    # Merge adjacent peaks (plateaus)
+    merged = []
+    for pi in peaks:
+        if not merged or pi - merged[-1] > 1:
+            merged.append(pi)
+
+    # Decide columns: 2 peaks that are sufficiently separated
+    columns_estimate = 1
+    suspected_multicol = False
+    if len(merged) >= 2:
+        # compute separation in normalized x
+        # take best-separated two peaks
+        best_sep = 0
+        for a in merged:
+            for b in merged:
+                if b <= a:
+                    continue
+                sep = abs(b - a) / bins
+                if sep > best_sep:
+                    best_sep = sep
+        if best_sep >= 0.18:  # ~18% of page width between peaks
+            columns_estimate = 2
+            suspected_multicol = True
 
     return {
-        "blocks_count": len(blocks),
+        "blocks_count": len(all_blocks),
+        "blocks_useful_count": len(useful),
         "columns_estimate": columns_estimate,
         "suspected_multicol": suspected_multicol,
         "table_like_ratio": table_like_ratio,
-        "sample_blocks": blocks[:8],  # debug only
+        "x0_histogram": hist,          # useful for debugging / tuning
+        "x0_peaks_bins": merged,       # idem
+        "sample_blocks": all_blocks[:8],
     }
+
 
 
 @app.post("/extract")

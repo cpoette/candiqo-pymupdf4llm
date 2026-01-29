@@ -487,13 +487,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     warnings = []
     meta = {"pages": None}
 
-    layout_signals = None
-    try:
-        layout_signals = compute_layout_signals_from_blocks(blocks, page_width=page.rect.width, bins=30)
-    except Exception:
-        warnings.append("pymupdf_layout_signals_failed")
-
-
+   
     # Lazy imports (important for layout import order)
     try:
         import fitz  # PyMuPDF
@@ -556,6 +550,12 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
             doc.close()
         except Exception:
             pass
+
+    layout_signals = None
+    try:
+        layout_signals = compute_layout_signals_from_blocks(blocks, page_width=page.rect.width, bins=30)
+    except Exception:
+        warnings.append("pymupdf_layout_signals_failed")
 
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")

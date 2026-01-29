@@ -303,7 +303,7 @@ def pymupdf_layout_chaos_signals(pdf_path: str, page_index: int = 0) -> Dict[str
     # --- columns estimate via x0 peaks (simple & fast) ---
     xcs = np.array([b["xc"] for b in text_blocks], dtype=np.float32)
     # histogram bins
-    bins = 20
+    bins = 50
     hist, edges = np.histogram(xcs, bins=bins)
     # find peaks bins (top 2)
     peak_bins = hist.argsort()[-2:][::-1]

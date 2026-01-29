@@ -565,7 +565,7 @@ def compute_layout_signals(pdf_path: str, max_pages: int = 2) -> Dict[str, Any]:
     xs = [x for x in xs if 0.0 <= x <= 1.0]
 
     # Histogram bins
-    bins = 20
+    bins = 50
     hist = [0] * bins
     for x in xs:
         idx = min(bins - 1, max(0, int(x * bins)))

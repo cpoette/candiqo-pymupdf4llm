@@ -2,6 +2,8 @@ import base64
 import os
 import re
 import tempfile
+import numpy as np
+import cv2
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -150,6 +152,108 @@ def _save_uploaded_pdf() -> IncomingPdf:
     raise ValueError("No PDF provided. Use multipart field 'pdf' or JSON with content_base64.")
 
 
+def _render_page_to_image(pdf_path: str, page_index: int = 0, zoom: float = 2.0):
+    """
+    Render a PDF page to an RGB numpy array using PyMuPDF.
+    This is NOT OCR: we just rasterize the PDF for layout analysis.
+    """
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(pdf_path)
+    page = doc[page_index]
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat, alpha=False)
+    doc.close()
+
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    else:
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return img
+
+
+def opencv_layout_signals(pdf_path: str, page_index: int = 0) -> Dict[str, Any]:
+    """
+    POC: detect multi-column layout using OpenCV (no OCR).
+    Returns signals:
+      - suspected_multicol
+      - columns_estimate (1/2)
+      - x_split (estimated separation x in pixels, if any)
+      - separators_count
+    """
+    img = _render_page_to_image(pdf_path, page_index=page_index, zoom=2.0)
+
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Binarize (text tends to be dark)
+    # Using adaptive threshold to handle different backgrounds.
+    thr = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,  # blockSize
+        15   # C
+    )
+
+    # Remove small noise (optional)
+    thr = cv2.medianBlur(thr, 3)
+
+    # Compute vertical projection (sum of black pixels per column)
+    col_sum = thr.sum(axis=0).astype(np.float32) / 255.0  # count of "ink" pixels per x
+
+    # Smooth projection
+    k = max(9, int(w * 0.01) // 2 * 2 + 1)  # odd kernel ~1% width
+    col_sum_smooth = cv2.GaussianBlur(col_sum.reshape(1, -1), (k, 1), 0).flatten()
+
+    # Normalize
+    maxv = float(col_sum_smooth.max()) if col_sum_smooth.size else 1.0
+    norm = col_sum_smooth / (maxv if maxv > 0 else 1.0)
+
+    # Look for a "valley" near center -> possible column gap
+    center = w // 2
+    span = int(w * 0.25)  # search in middle 50% area
+    lo = max(0, center - span)
+    hi = min(w - 1, center + span)
+
+    valley_x = int(lo + np.argmin(norm[lo:hi+1])) if hi > lo else center
+    valley_val = float(norm[valley_x])
+
+    # Heuristic: if the middle valley is "low enough" compared to average, likely 2 columns.
+    # (Tune later with your corpus)
+    avg_val = float(norm.mean()) if norm.size else 1.0
+
+    suspected_multicol = (valley_val < 0.25 and avg_val > 0.12)
+
+    # Also count how wide the valley region is (continuous low area)
+    low_mask = norm < 0.22
+    # find contiguous low segment containing valley_x
+    left = valley_x
+    while left > 0 and low_mask[left]:
+        left -= 1
+    right = valley_x
+    while right < w - 1 and low_mask[right]:
+        right += 1
+    valley_width = int(right - left)
+
+    # columns estimate: 2 if suspected, else 1
+    columns_estimate = 2 if suspected_multicol else 1
+
+    return {
+        "page_index": page_index,
+        "img_w": w,
+        "img_h": h,
+        "suspected_multicol": suspected_multicol,
+        "columns_estimate": columns_estimate,
+        "x_split": int(valley_x) if suspected_multicol else None,
+        "valley_val": round(valley_val, 4),
+        "avg_val": round(avg_val, 4),
+        "valley_width": valley_width,
+    }
+
+
+
 # ------------------------------------------------------------
 # Extraction implementation placeholder
 # ------------------------------------------------------------
@@ -162,6 +266,13 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     """
     warnings = []
     meta = {"pages": None}
+
+    layout_signals_opencv = None
+    try:
+        layout_signals_opencv = opencv_layout_signals(pdf_path, page_index=0)
+    except Exception:
+        warnings.append("opencv_layout_failed")
+
 
     # Lazy imports (important for layout import order)
     try:
@@ -229,8 +340,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")
 
-    return text, meta, warnings
-
+    return text, {**meta, "layout_signals_opencv": layout_signals_opencv}, warnings
 
 
 # ------------------------------------------------------------

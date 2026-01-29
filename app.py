@@ -529,6 +529,16 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
         warnings.append("pymupdf_layout_signals_failed")
 
     try:
+        chaos = 0
+        if layout_signals["suspected_multicol"]:
+            chaos += 20
+        chaos += int(layout_signals["interleave_ratio"] * 80)   # 0..80
+        chaos += min(30, max(0, layout_signals["blocks_useful_count"] - 35))  # spam blocks
+        chaos = max(0, min(100, chaos))
+    except Exception:
+        warnings.append("cannot compute_layout_chaos_score")
+
+    try:
         meta["pages"] = doc.page_count
     except Exception:
         warnings.append("pymupdf_page_count_failed")
@@ -568,7 +578,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")
 
-    return text, {**meta, "layout_signal": layout_signals}, warnings
+    return text, {**meta, "layout_signal": layout_signals}, chaos, warnings
 
 
 # ------------------------------------------------------------

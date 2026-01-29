@@ -252,6 +252,109 @@ def opencv_layout_signals(pdf_path: str, page_index: int = 0) -> Dict[str, Any]:
         "valley_width": valley_width,
     }
 
+def compute_layout_signals_from_blocks(blocks, page_width=None, bins=20):
+    """
+    blocks: list of dicts with x0,x1,y0,y1 (or bbox)
+    Returns layout_signals with:
+      - x0_histogram
+      - x0_peaks_bins
+      - columns_estimate
+      - suspected_multicol
+      - interleave_ratio  (NEW)
+    """
+    import math
+
+    # Normalize blocks
+    b2 = []
+    for b in blocks or []:
+        if "bbox" in b and len(b["bbox"]) == 4:
+            x0, y0, x1, y1 = b["bbox"]
+        else:
+            x0, y0, x1, y1 = b.get("x0"), b.get("y0"), b.get("x1"), b.get("y1")
+        if x0 is None or y0 is None or x1 is None or y1 is None:
+            continue
+        w = max(0.0, float(x1) - float(x0))
+        h = max(0.0, float(y1) - float(y0))
+        b2.append({"x0": float(x0), "y0": float(y0), "x1": float(x1), "y1": float(y1), "w": w, "h": h})
+
+    if not b2:
+        return {
+            "blocks_count": 0,
+            "blocks_useful_count": 0,
+            "columns_estimate": 1,
+            "suspected_multicol": False,
+            "x0_histogram": [0]*bins,
+            "x0_peaks_bins": [],
+            "interleave_ratio": 0.0,
+        }
+
+    # Page width (fallback: max x1)
+    if not page_width:
+        page_width = max(b["x1"] for b in b2) or 1.0
+
+    # "useful" filter (avoid tiny dots)
+    useful = [b for b in b2 if b["w"] >= 8 and b["h"] >= 6]
+    if not useful:
+        useful = b2[:]  # fallback: keep all
+
+    # Histogram x0
+    hist = [0]*bins
+    for b in useful:
+        x = max(0.0, min(page_width - 1e-6, b["x0"]))
+        idx = int((x / page_width) * bins)
+        idx = max(0, min(bins-1, idx))
+        hist[idx] += 1
+
+    # Find peaks (simple local maxima)
+    peaks = []
+    for i in range(bins):
+        left = hist[i-1] if i-1 >= 0 else -1
+        right = hist[i+1] if i+1 < bins else -1
+        if hist[i] > 0 and hist[i] >= left and hist[i] >= right:
+            peaks.append(i)
+
+    # Keep only "strong" peaks
+    maxv = max(hist) if hist else 0
+    strong_peaks = [i for i in peaks if hist[i] >= max(2, int(0.35 * maxv))]
+
+    columns_estimate = 2 if len(strong_peaks) >= 2 else 1
+    suspected_multicol = columns_estimate >= 2
+
+    # NEW: interleaving ratio
+    # Sort by y0 with coarse rounding to keep same "row" together
+    sorted_blocks = sorted(useful, key=lambda b: (round(b["y0"] / 10) * 10, b["x0"]))
+
+    # Assign each block to nearest peak bin (or its own bin if no peaks)
+    def block_bin(b):
+        x = max(0.0, min(page_width - 1e-6, b["x0"]))
+        bi = int((x / page_width) * bins)
+        bi = max(0, min(bins-1, bi))
+        if not strong_peaks:
+            return bi
+        # nearest peak
+        return min(strong_peaks, key=lambda p: abs(p - bi))
+
+    seq = [block_bin(b) for b in sorted_blocks]
+
+    # Count switches (A->B where A != B)
+    switches = 0
+    for i in range(1, len(seq)):
+        if seq[i] != seq[i-1]:
+            switches += 1
+
+    interleave_ratio = switches / max(1, (len(seq) - 1))
+
+    return {
+        "blocks_count": len(b2),
+        "blocks_useful_count": len(useful),
+        "columns_estimate": columns_estimate,
+        "suspected_multicol": suspected_multicol,
+        "x0_histogram": hist,
+        "x0_peaks_bins": strong_peaks,
+        "interleave_ratio": round(interleave_ratio, 3),
+    }
+
+
 def pymupdf_layout_chaos_signals(pdf_path: str, page_index: int = 0) -> Dict[str, Any]:
     import fitz
     import numpy as np
@@ -384,11 +487,11 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     warnings = []
     meta = {"pages": None}
 
-    layout_chaos = None
+    layout_signals = None
     try:
-        layout_chaos = pymupdf_layout_chaos_signals(pdf_path, page_index=0)
+        layout_signals = compute_layout_signals_from_blocks(blocks, page_width=page.rect.width, bins=30)
     except Exception:
-        warnings.append("pymupdf_layout_chaos_failed")
+        warnings.append("pymupdf_layout_signals_failed")
 
 
     # Lazy imports (important for layout import order)
@@ -457,7 +560,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")
 
-    return text, {**meta, "layout_chaos": layout_chaos}, warnings
+    return text, {**meta, "layout_signal": layout_signals}, warnings
 
 
 # ------------------------------------------------------------

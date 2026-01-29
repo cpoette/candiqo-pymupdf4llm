@@ -252,6 +252,123 @@ def opencv_layout_signals(pdf_path: str, page_index: int = 0) -> Dict[str, Any]:
         "valley_width": valley_width,
     }
 
+def pymupdf_layout_chaos_signals(pdf_path: str, page_index: int = 0) -> Dict[str, Any]:
+    import fitz
+    import numpy as np
+    import re
+
+    doc = fitz.open(pdf_path)
+    page = doc[page_index]
+    d = page.get_text("dict")
+    doc.close()
+
+    blocks = d.get("blocks", []) or []
+
+    text_blocks = []
+    for b in blocks:
+        if b.get("type") != 0:  # 0 = text
+            continue
+        bbox = b.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        # collect text from spans
+        txt_parts = []
+        for ln in b.get("lines", []) or []:
+            for sp in ln.get("spans", []) or []:
+                t = sp.get("text", "")
+                if t:
+                    txt_parts.append(t)
+        text = " ".join(txt_parts).strip()
+        if not text:
+            continue
+
+        x0, y0, x1, y1 = bbox
+        words = re.findall(r"[A-Za-zÀ-ÿ]{2,}", text)
+        text_blocks.append({
+            "x0": float(x0), "y0": float(y0), "x1": float(x1), "y1": float(y1),
+            "xc": float((x0 + x1) / 2.0),
+            "w": float(x1 - x0),
+            "h": float(y1 - y0),
+            "words": len(words),
+        })
+
+    n = len(text_blocks)
+    if n == 0:
+        return {
+            "blocks_text_count": 0,
+            "chaos_score": 100,
+            "flags": ["no_text_blocks"]
+        }
+
+    # --- columns estimate via x0 peaks (simple & fast) ---
+    xcs = np.array([b["xc"] for b in text_blocks], dtype=np.float32)
+    # histogram bins
+    bins = 20
+    hist, edges = np.histogram(xcs, bins=bins)
+    # find peaks bins (top 2)
+    peak_bins = hist.argsort()[-2:][::-1]
+    peak_bins = sorted([int(x) for x in peak_bins])
+    # heuristic: if two peaks have meaningful mass -> multicol
+    total = hist.sum() if hist.sum() else 1
+    peak_mass = (hist[peak_bins[0]] + hist[peak_bins[1]]) / total
+    suspected_multicol = (peak_mass > 0.45 and abs(peak_bins[1] - peak_bins[0]) >= 5)
+
+    x_split = None
+    if suspected_multicol:
+        # split between peaks
+        left_edge = edges[peak_bins[0] + 1]
+        right_edge = edges[peak_bins[1]]
+        x_split = float((left_edge + right_edge) / 2.0)
+
+    # --- fragmentation ---
+    words_arr = np.array([b["words"] for b in text_blocks], dtype=np.int32)
+    median_block_words = float(np.median(words_arr)) if n else 0.0
+
+    # --- choose traversal order to measure "native chaos" ---
+    # Option A: native order returned by pymupdf dict (closest to internal order)
+    # We'll just keep current text_blocks order (already in that order).
+    # If you want: can compute both native + (y,x) and keep worst.
+    blocks_native = text_blocks
+
+    # --- y backtrack rate ---
+    back = 0
+    prev_y = blocks_native[0]["y0"]
+    for b in blocks_native[1:]:
+        if b["y0"] < prev_y - 3:  # small tolerance
+            back += 1
+        prev_y = b["y0"]
+    y_backtrack_rate = back / max(1, n - 1)
+
+    # --- column switch rate ---
+    col_switch_rate = 0.0
+    if suspected_multicol and x_split is not None:
+        cols = [0 if b["xc"] < x_split else 1 for b in blocks_native]
+        switches = sum(1 for i in range(1, len(cols)) if cols[i] != cols[i-1])
+        col_switch_rate = switches / max(1, n - 1)
+
+    # --- chaos score (tunable) ---
+    chaos = 0
+    if n > 120: chaos += 30
+    if median_block_words < 4: chaos += 20
+    if y_backtrack_rate > 0.12: chaos += 25
+    if suspected_multicol and col_switch_rate > 0.20: chaos += 25
+
+    chaos = max(0, min(100, chaos))
+
+    flags = []
+    if chaos >= 55: flags.append("layout_chaotic")
+    else: flags.append("layout_stable")
+
+    return {
+        "blocks_text_count": n,
+        "median_block_words": round(median_block_words, 2),
+        "suspected_multicol": bool(suspected_multicol),
+        "x_split": int(x_split) if x_split is not None else None,
+        "y_backtrack_rate": round(float(y_backtrack_rate), 4),
+        "col_switch_rate": round(float(col_switch_rate), 4),
+        "chaos_score": int(chaos),
+        "flags": flags,
+    }
 
 
 # ------------------------------------------------------------
@@ -267,11 +384,11 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     warnings = []
     meta = {"pages": None}
 
-    layout_signals_opencv = None
+   layout_chaos = None
     try:
-        layout_signals_opencv = opencv_layout_signals(pdf_path, page_index=0)
+        layout_chaos = pymupdf_layout_chaos_signals(pdf_path, page_index=0)
     except Exception:
-        warnings.append("opencv_layout_failed")
+        warnings.append("pymupdf_layout_chaos_failed")
 
 
     # Lazy imports (important for layout import order)
@@ -340,7 +457,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")
 
-    return text, {**meta, "layout_signals_opencv": layout_signals_opencv}, warnings
+    return text, {**meta, "layout_chaos": layout_chaos}, warnings
 
 
 # ------------------------------------------------------------

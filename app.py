@@ -1,4 +1,5 @@
 import base64
+from curses import raw
 import os
 import re
 import tempfile
@@ -513,8 +514,19 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     # Open once
     try:
         doc = fitz.open(pdf_path)
+        
     except Exception as e:
         raise RuntimeError(f"fitz.open failed: {e}")
+
+    layout_signals = None
+    page = doc[0]
+    raw = page.get_text("dict")
+    blocks = raw.get("blocks", [])
+    
+    try:
+        layout_signals = compute_layout_signals_from_blocks(blocks, page_width=page.rect.width, bins=30)
+    except Exception:
+        warnings.append("pymupdf_layout_signals_failed")
 
     try:
         meta["pages"] = doc.page_count
@@ -551,11 +563,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
         except Exception:
             pass
 
-    layout_signals = None
-    try:
-        layout_signals = compute_layout_signals_from_blocks(blocks, page_width=page.rect.width, bins=30)
-    except Exception:
-        warnings.append("pymupdf_layout_signals_failed")
+   
 
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")

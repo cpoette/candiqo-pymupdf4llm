@@ -384,7 +384,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     warnings = []
     meta = {"pages": None}
 
-   layout_chaos = None
+    layout_chaos = None
     try:
         layout_chaos = pymupdf_layout_chaos_signals(pdf_path, page_index=0)
     except Exception:

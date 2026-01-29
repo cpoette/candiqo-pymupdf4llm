@@ -578,7 +578,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")
 
-    return text, {**meta, "layout_signal": layout_signals}, chaos, warnings
+    return text, {**meta, "layout_signal": layout_signals, "chaos": chaos}, warnings
 
 
 # ------------------------------------------------------------

@@ -387,7 +387,7 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
         "used_param_fallback": ("pymupdf4llm_param_fallback" in warnings),
     }
 
-    return text, {**meta, "layout_signal": layout_signals, "chaos": chaos, "debug": meta_debug}, warnings
+    return text, {**meta, "layout_signal": layout_signals, "chaos": chaos_layout, "debug": meta_debug}, warnings
 
 
    # return text, meta_out, warnings

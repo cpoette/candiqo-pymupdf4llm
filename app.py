@@ -371,7 +371,26 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
         "layout_signals": layout_signals,
         "chaos_layout": chaos_layout,
     }
-    return text, meta_out, warnings
+
+    # --- Debug meta to prove which branch ran ---
+    try:
+        import pymupdf4llm
+        pymupdf4llm_version = getattr(pymupdf4llm, "__version__", None)
+    except Exception:
+        pymupdf4llm_version = None
+
+    meta_debug = {
+        "impl_strategy": strategy,
+        "use_layout": use_layout,
+        "enable_ocr": enable_ocr,
+        "pymupdf4llm_version": pymupdf4llm_version,
+        "used_param_fallback": ("pymupdf4llm_param_fallback" in warnings),
+    }
+
+    return text, {**meta, "layout_signal": layout_signals, "chaos": chaos, "debug": meta_debug}, warnings
+
+
+   # return text, meta_out, warnings
 
 
 # ------------------------------------------------------------
@@ -426,7 +445,7 @@ def extract():
 
         # Keep response stable
         return jsonify({
-            "strategy_used": SERVICE_NAME if strategy_q == "auto" else strategy_q,
+            "strategy_used": impl_strategy,
             "text": text,
             "meta": {
                 "filename": incoming.filename,

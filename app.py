@@ -365,11 +365,11 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
     if not text.strip():
         warnings.append("pymupdf4llm_empty_output")
 
-    # ✅ SSOT: ONE place only
+    # ✅ SSOT: ONE place only (stable keys)
     meta_out = {
         **meta,
-        "layout_signals": layout_signals,
-        "chaos_layout": chaos_layout,
+        "layout_signals": layout_signals,   # <- toujours pluriel
+        "chaos_layout": chaos_layout,       # <- toujours chaos_layout
     }
 
     # --- Debug meta to prove which branch ran ---
@@ -387,10 +387,9 @@ def extract_text_impl(pdf_path: str, *, strategy: str = "pymupdf4llm"):
         "used_param_fallback": ("pymupdf4llm_param_fallback" in warnings),
     }
 
-    return text, {**meta, "layout_signal": layout_signals, "chaos": chaos_layout, "debug": meta_debug}, warnings
+    meta_out["debug"] = meta_debug
 
-
-   # return text, meta_out, warnings
+    return text, meta_out, warnings
 
 
 # ------------------------------------------------------------
